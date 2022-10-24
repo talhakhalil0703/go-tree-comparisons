@@ -7,10 +7,16 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-var numberOfBst = 0
+var NumberOfBst = 0
+var HashTime time.Duration
+var HashGroupTime time.Duration
+var HashWorkers = 1
+var HashMutex sync.RWMutex
+var HashWaitGroup sync.WaitGroup
 
 type grouping struct {
 	groupId int
@@ -22,6 +28,11 @@ type node struct {
 	right *node
 	value int
 	index int
+}
+
+type hashChannelData struct {
+	node *node
+	hash int
 }
 
 func insertIntoBst(root *node, val int) *node {
@@ -163,19 +174,20 @@ func printTreeComparisons(groups []grouping) {
 
 func main() {
 	// Defining arguments
-	// var HashWorkersFlag = flag.Int("hash-workers", 1, "Number of threads")
+	var HashWorkersFlag = flag.Int("hash-workers", 1, "Number of threads")
 	// var DataWorkersFlag = flag.Int("data-workers", 1, "Number of threads")
 	// var CompWorkersFlag = flag.Int("comp-workers", 1, "Number of threads")
+	var use_mutexes = flag.Bool("use-mutex", false, "internal flag control")
 	var input_flag = flag.String("input", "", "string path to an input file")
 	flag.Parse()
 
+	HashWorkers = *HashWorkersFlag
+	//Reading Bsts
 	read_file, _ := os.Open(*input_flag)
 	file_scanner := bufio.NewScanner(read_file)
 	file_scanner.Split(bufio.ScanLines)
 
-	hash_to_tree_map := make(map[int][]*node)
-	var hash_time time.Duration
-	var hash_group_time time.Duration
+	var bsts []node
 	for file_scanner.Scan() {
 		var root node
 		// fileScanner.Text returns a single line in this case that would be a BST
@@ -187,30 +199,113 @@ func main() {
 				insertIntoBst(&root, number)
 			} else {
 				root.value = number
-				root.index = numberOfBst
+				root.index = NumberOfBst
 			}
 		}
+		bsts = append(bsts, root)
+		NumberOfBst++
+	}
+	read_file.Close()
 
-		hash_start := time.Now()
-		hash := computeHash(&root, 1)
-		hash_time += time.Since(hash_start)
-		hash_to_tree_map[hash] = append(hash_to_tree_map[hash], &root)
-		hash_group_time += time.Since(hash_start)
-
-		// str := createInOrderHashString(&root, " ")
-		// fmt.Print(str)
-		// fmt.Printf("%d \n", hash)
-		numberOfBst++
+	var hash_to_tree_map map[int][]*node
+	if HashWorkers == 1 {
+		fmt.Println("Hashing Sequentially")
+		hash_to_tree_map = sequentialHashing(bsts)
+	} else {
+		fmt.Println("Hashing in Parallel")
+		if *use_mutexes {
+			hash_to_tree_map = goroutineHashingMutex(bsts)
+		} else {
+			hash_to_tree_map = goroutineHashingChannels(bsts)
+		}
 	}
 
-	// printHashWithTrees(hash_to_tree_map)
-	fmt.Println("hashTime:", hash_time)
-	fmt.Println("hashGroupTime:", hash_group_time)
+	fmt.Println("hashTime:", HashTime)
+	fmt.Println("hashGroupTime:", HashGroupTime)
 	printHashGroups(hash_to_tree_map)
 	start := time.Now()
 	comparison_grouping := compareTreeWithIdenticalHashes(hash_to_tree_map)
 	fmt.Println("compareTreeTime:", time.Since(start))
 	printTreeComparisons(comparison_grouping)
-	read_file.Close()
 	// fmt.Println(*HashWorkersFlag)
+}
+
+func sequentialHashing(bsts []node) map[int][]*node {
+	hash_to_tree_map := make(map[int][]*node)
+	for i := 0; i < NumberOfBst; i++ {
+		hash_start := time.Now()
+		hash := computeHash(&bsts[i], 1)
+		HashTime += time.Since(hash_start)
+		hash_to_tree_map[hash] = append(hash_to_tree_map[hash], &bsts[i])
+		HashGroupTime += time.Since(hash_start)
+	}
+	return hash_to_tree_map
+}
+
+func goroutineHashingChannels(bsts []node) map[int][]*node {
+	hash_to_tree_map := make(map[int][]*node)
+	hashChannel := make(chan hashChannelData)
+	var hash_channel_data_list []hashChannelData
+
+	hash_start := time.Now()
+	for i := 0; i < HashWorkers; i++ {
+		go computeHashToChannel(i, bsts, hashChannel)
+	}
+
+	for i := 0; i < NumberOfBst; i++ {
+		hash_channel_data := <-hashChannel
+		hash_channel_data_list = append(hash_channel_data_list, hash_channel_data)
+	}
+	HashTime = time.Since(hash_start)
+
+	for i := 0; i < NumberOfBst; i++ {
+		hash_channel_data := hash_channel_data_list[i]
+		hash_to_tree_map[hash_channel_data.hash] = append(hash_to_tree_map[hash_channel_data.hash], hash_channel_data.node)
+	}
+	HashGroupTime = time.Since(hash_start)
+
+	return hash_to_tree_map
+}
+
+func computeHashToChannel(offset int, bsts []node, result chan hashChannelData) {
+	var hash_data hashChannelData
+	for i := offset; i < NumberOfBst; i += HashWorkers {
+		hash_data.hash = computeHash(&bsts[i], 1)
+		hash_data.node = &bsts[i]
+		result <- hash_data
+	}
+}
+
+func goroutineHashingMutex(bsts []node) map[int][]*node {
+	hash_to_tree_map := make(map[int][]*node)
+	var hash_data_list []hashChannelData
+
+	HashWaitGroup.Add(HashWorkers)
+	hash_start := time.Now()
+	for i := 0; i < HashWorkers; i++ {
+		go computeHashUsingMutex(i, bsts, &hash_data_list)
+	}
+
+	HashWaitGroup.Wait()
+	HashTime = time.Since(hash_start)
+
+	for i := 0; i < NumberOfBst; i++ {
+		hash_channel_data := hash_data_list[i]
+		hash_to_tree_map[hash_channel_data.hash] = append(hash_to_tree_map[hash_channel_data.hash], hash_channel_data.node)
+	}
+	HashGroupTime = time.Since(hash_start)
+
+	return hash_to_tree_map
+}
+
+func computeHashUsingMutex(offset int, bsts []node, hash_data_list *[]hashChannelData) {
+	var hash_data hashChannelData
+	for i := offset; i < NumberOfBst; i += HashWorkers {
+		hash_data.hash = computeHash(&bsts[i], 1)
+		hash_data.node = &bsts[i]
+		HashMutex.Lock()
+		*hash_data_list = append(*hash_data_list, hash_data)
+		HashMutex.Unlock()
+	}
+	HashWaitGroup.Done()
 }
