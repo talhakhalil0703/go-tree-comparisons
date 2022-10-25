@@ -17,6 +17,10 @@ var HashGroupTime time.Duration
 var HashWorkers = 1
 var HashMutex sync.RWMutex
 var HashWaitGroup sync.WaitGroup
+var ComparisonWaitGroup sync.WaitGroup
+var ComparisonGroupIdMutex sync.RWMutex
+var ComparisonGroupMutex sync.RWMutex
+var ComparisonUniqueTraversal sync.RWMutex
 
 type grouping struct {
 	groupId int
@@ -33,6 +37,11 @@ type node struct {
 type hashChannelData struct {
 	node *node
 	hash int
+}
+
+type parallelChannelData struct {
+	inorder string
+	bst_id  int
 }
 
 func insertIntoBst(root *node, val int) *node {
@@ -127,7 +136,7 @@ func createInOrderHashString(root *node, str string) string {
 	return str
 }
 
-func compareTreeWithIdenticalHashes(m map[int][]*node) []grouping {
+func sequentialCompareTreeWithIdenticalHashes(m map[int][]*node) []grouping {
 	keys := make([]int, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
@@ -159,11 +168,129 @@ func compareTreeWithIdenticalHashes(m map[int][]*node) []grouping {
 	return groups
 }
 
+func createInOrderHashStringChannel(root *node, result chan parallelChannelData) {
+	ret := createInOrderHashString(root, "")
+	result <- parallelChannelData{ret, root.index}
+}
+
+func parallelCompareTreeWithIdenticalHashes(m map[int][]*node) []grouping {
+	keys := make([]int, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	unique_group_id := 0
+	parallel_channel := make(chan parallelChannelData)
+	for _, key := range keys {
+		nodes_pointer_list := m[key]
+		if len(nodes_pointer_list) > 1 {
+			for _, node_pointer := range nodes_pointer_list {
+				go createInOrderHashStringChannel(node_pointer, parallel_channel)
+			}
+		}
+	}
+
+	var groups []grouping
+	unique_traversals := make(map[string]int)
+	var time_for_map time.Duration
+	for _, key := range keys {
+		nodes_pointer_list := m[key]
+		if len(nodes_pointer_list) > 1 {
+			for i := 0; i < len(nodes_pointer_list); i++ {
+				channel_data := <-parallel_channel
+				time_now := time.Now()
+				groupId, ok := unique_traversals[channel_data.inorder]
+				time_for_map += time.Since(time_now)
+				if ok {
+					//Traversal already accounted for
+					groups[groupId].bstIds = append(groups[groupId].bstIds, channel_data.bst_id)
+				} else {
+					//traversal not accounted for, add it in
+					unique_traversals[channel_data.inorder] = unique_group_id
+					var new_group grouping
+					new_group.groupId = unique_group_id
+					new_group.bstIds = append(new_group.bstIds, channel_data.bst_id)
+					groups = append(groups, new_group)
+					unique_group_id++
+				}
+			}
+		}
+	}
+
+	// fmt.Println("TimeMapCheck", time_for_map)
+	return groups
+}
+
+func sequentialCompareTreeWithIdenticalHashesAdj(m map[int][]*node) []grouping {
+	keys := make([]int, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+
+	unique_group_id := 0
+	var groups []grouping
+	var adj_matrix [][]bool
+
+	for i := 0; i < NumberOfBst; i++ {
+		var inner []bool
+		for j := 0; j < NumberOfBst; j++ {
+			inner = append(inner, false)
+		}
+		adj_matrix = append(adj_matrix, inner)
+	}
+
+	for _, key := range keys {
+		nodes_pointer_list := m[key]
+		for i := 0; i < len(nodes_pointer_list); i++ {
+			for j := i; j < len(nodes_pointer_list); j++ {
+				result := true
+				if createInOrderHashString(nodes_pointer_list[i], "") != createInOrderHashString(nodes_pointer_list[j], "") {
+					result = false
+				}
+				adj_matrix[nodes_pointer_list[i].index][nodes_pointer_list[j].index] = result
+				adj_matrix[nodes_pointer_list[j].index][nodes_pointer_list[i].index] = result
+			}
+		}
+	}
+	consumed := make(map[int]bool)
+
+	for _, key := range keys {
+		nodes_pointer_list := m[key]
+		for j := 0; j < len(nodes_pointer_list); j++ {
+			if consumed[nodes_pointer_list[j].index] {
+				continue
+			}
+
+			var group grouping
+			group.groupId = unique_group_id
+			unique_group_id++
+			group.bstIds = append(group.bstIds, nodes_pointer_list[j].index)
+			consumed[nodes_pointer_list[j].index] = true
+
+			for k := j; k < len(nodes_pointer_list); k++ {
+				if consumed[nodes_pointer_list[k].index] {
+					continue
+				}
+
+				if adj_matrix[nodes_pointer_list[j].index][nodes_pointer_list[k].index] {
+					consumed[nodes_pointer_list[k].index] = true
+					group.bstIds = append(group.bstIds, nodes_pointer_list[k].index)
+				}
+			}
+
+			groups = append(groups, group)
+		}
+	}
+
+	return groups
+}
+
 func printTreeComparisons(groups []grouping) {
-	for group_id, group := range groups {
+	found := 0
+	for _, group := range groups {
 		if len(group.bstIds) > 1 {
 
-			fmt.Printf("group %d: ", group_id)
+			fmt.Printf("group %d: ", found)
+			found++
 			for _, tree_id := range group.bstIds {
 				fmt.Printf("%d ", tree_id)
 			}
@@ -176,7 +303,7 @@ func main() {
 	// Defining arguments
 	var HashWorkersFlag = flag.Int("hash-workers", 1, "Number of threads")
 	// var DataWorkersFlag = flag.Int("data-workers", 1, "Number of threads")
-	// var CompWorkersFlag = flag.Int("comp-workers", 1, "Number of threads")
+	var CompWorkersFlag = flag.Int("comp-workers", 1, "Number of threads")
 	var use_mutexes = flag.Bool("use-mutex", false, "internal flag control")
 	var input_flag = flag.String("input", "", "string path to an input file")
 	flag.Parse()
@@ -209,10 +336,10 @@ func main() {
 
 	var hash_to_tree_map map[int][]*node
 	if HashWorkers == 1 {
-		fmt.Println("Hashing Sequentially")
+		// fmt.Println("Hashing Sequentially")
 		hash_to_tree_map = sequentialHashing(bsts)
 	} else {
-		fmt.Println("Hashing in Parallel")
+		// fmt.Println("Hashing in Parallel")
 		if *use_mutexes {
 			hash_to_tree_map = goroutineHashingMutex(bsts)
 		} else {
@@ -220,14 +347,21 @@ func main() {
 		}
 	}
 
-	fmt.Println("hashTime:", HashTime)
-	fmt.Println("hashGroupTime:", HashGroupTime)
+	fmt.Println("hashTime:", HashTime.Seconds())
+	fmt.Println("hashGroupTime:", HashGroupTime.Seconds())
 	printHashGroups(hash_to_tree_map)
+	var comparison_grouping []grouping
 	start := time.Now()
-	comparison_grouping := compareTreeWithIdenticalHashes(hash_to_tree_map)
-	fmt.Println("compareTreeTime:", time.Since(start))
+
+	if *CompWorkersFlag == 1 {
+		// fmt.Println("Comparison Sequentially")
+		comparison_grouping = sequentialCompareTreeWithIdenticalHashes(hash_to_tree_map)
+	} else {
+		// fmt.Println("Comparison N Parallel")
+		comparison_grouping = parallelCompareTreeWithIdenticalHashes(hash_to_tree_map)
+	}
+	fmt.Println("compareTreeTime:", time.Since(start).Seconds())
 	printTreeComparisons(comparison_grouping)
-	// fmt.Println(*HashWorkersFlag)
 }
 
 func sequentialHashing(bsts []node) map[int][]*node {
