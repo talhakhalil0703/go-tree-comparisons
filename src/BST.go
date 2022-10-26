@@ -23,6 +23,9 @@ var ComparisonWaitGroup sync.WaitGroup
 var ComparisonGroupIdMutex sync.RWMutex
 var ComparisonGroupMutex sync.RWMutex
 var ComparisonUniqueTraversal sync.RWMutex
+var BufferCVFull sync.Cond
+var BufferCVEmpty sync.Cond
+var BufferMutex sync.RWMutex
 
 type grouping struct {
 	groupId int
@@ -45,6 +48,14 @@ type parallelChannelData struct {
 	root    *node
 	inorder string
 	bst_id  int
+}
+
+type circularNodeBuffer struct {
+	end   int
+	start int
+	data  []*node
+	items int
+	full  bool
 }
 
 func insertIntoBst(root *node, val int) *node {
@@ -140,15 +151,84 @@ func sequentialCompareTreeWithIdenticalHashes(m map[int][]*node) []grouping {
 	return groups
 }
 
-func createInOrderHashStringChannel(nodes_to_compute []node, return_channel chan parallelChannelData, offset int) {
+func createBuffer(buffer *circularNodeBuffer) {
+	buffer.data = make([]*node, CompWorkers)
+	buffer.full = false
+	buffer.start = -1
+	buffer.end = -1
+	buffer.items = 0
+}
+
+func placeInBuffer(buffer *circularNodeBuffer, root *node) {
+	BufferMutex.Lock()
+	for (*buffer).items == CompWorkers {
+		BufferCVEmpty.Wait()
+	}
+
+	(*buffer).start++
+	if (*buffer).start == CompWorkers {
+		(*buffer).start = 0
+	}
+	(*buffer).items++
+	(*buffer).data[(*buffer).start] = root
+
+	if (*buffer).items > 0 {
+		BufferCVFull.Signal()
+	}
+
+	BufferMutex.Unlock()
+}
+
+func removeFromBuffer(buffer *circularNodeBuffer) (root *node) {
+
+	BufferMutex.Lock()
+	for (*buffer).items == 0 {
+		BufferCVFull.Wait()
+	}
+
+	(*buffer).end++
+	if (*buffer).end == CompWorkers {
+		(*buffer).end = 0
+	}
+	(*buffer).items--
+
+	ret := (*buffer).data[(*buffer).end]
+
+	if (*buffer).items < CompWorkers {
+		BufferCVEmpty.Signal()
+	}
+
+	BufferMutex.Unlock()
+
+	return ret
+}
+
+func createInOrderHashStringChannel(nodes_to_compute []node, return_channel chan parallelChannelData, buffer *circularNodeBuffer, offset int) {
 
 	for i := offset; i < len(nodes_to_compute); i += CompWorkers {
-		ret := createInOrderHashString(&nodes_to_compute[i], "")
-		return_channel <- parallelChannelData{&nodes_to_compute[i], ret, nodes_to_compute[i].index}
+		root := removeFromBuffer(buffer)
+		ret := createInOrderHashString(root, "")
+		return_channel <- parallelChannelData{root, ret, root.index}
 	}
 
 	ParallelWaitGroup.Done()
 
+}
+
+func feedNodeDataThroughChannel(m map[int][]*node, buffer *circularNodeBuffer) {
+	keys := make([]int, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+
+	for _, key := range keys {
+		nodes_pointer_list := m[key]
+		if len(nodes_pointer_list) > 1 {
+			for _, node_pointer := range nodes_pointer_list {
+				placeInBuffer(buffer, node_pointer)
+			}
+		}
+	}
 }
 
 func parallelCompareTreeWithIdenticalHashes(m map[int][]*node) []grouping {
@@ -158,21 +238,26 @@ func parallelCompareTreeWithIdenticalHashes(m map[int][]*node) []grouping {
 	}
 	unique_group_id := 0
 	return_channel := make(chan parallelChannelData)
+
 	var nodes_to_compute []node
 	ParallelWaitGroup.Add(CompWorkers)
 
+	var buffer circularNodeBuffer
+	createBuffer(&buffer)
+	BufferCVEmpty = *sync.NewCond(&BufferMutex)
+	BufferCVFull = *sync.NewCond(&BufferMutex)
+	go feedNodeDataThroughChannel(m, &buffer)
 	for _, key := range keys {
 		nodes_pointer_list := m[key]
 		if len(nodes_pointer_list) > 1 {
 			for _, node_pointer := range nodes_pointer_list {
 				nodes_to_compute = append(nodes_to_compute, *node_pointer)
-				// feed_channel <- parallelChannelData{node_pointer, "", node_pointer.index}
 			}
 		}
 	}
 
 	for i := 0; i < CompWorkers; i++ {
-		go createInOrderHashStringChannel(nodes_to_compute, return_channel, i)
+		go createInOrderHashStringChannel(nodes_to_compute, return_channel, &buffer, i)
 	}
 
 	var groups []grouping
