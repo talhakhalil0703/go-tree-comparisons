@@ -188,9 +188,9 @@ func removeFromBuffer(buffer *nodeBuffer) (root *node) {
 	return ret
 }
 
-func createInOrderHashStringChannel(nodes_to_compute []node, return_channel chan parallelChannelData, buffer *nodeBuffer, offset int) {
+func createInOrderHashStringChannel(nodes_to_compute int, return_channel chan parallelChannelData, buffer *nodeBuffer, offset int) {
 
-	for i := offset; i < len(nodes_to_compute); i += CompWorkers {
+	for i := offset; i < nodes_to_compute; i += CompWorkers {
 		root := removeFromBuffer(buffer)
 		ret := createInOrderHashString(root, "")
 		return_channel <- parallelChannelData{root, ret, root.index}
@@ -224,7 +224,7 @@ func parallelCompareTreeWithIdenticalHashes(m map[int][]*node) []grouping {
 	unique_group_id := 0
 	return_channel := make(chan parallelChannelData)
 
-	var nodes_to_compute []node
+	nodes_to_compute := 0
 	ParallelWaitGroup.Add(CompWorkers)
 
 	var buffer nodeBuffer
@@ -235,9 +235,7 @@ func parallelCompareTreeWithIdenticalHashes(m map[int][]*node) []grouping {
 	for _, key := range keys {
 		nodes_pointer_list := m[key]
 		if len(nodes_pointer_list) > 1 {
-			for _, node_pointer := range nodes_pointer_list {
-				nodes_to_compute = append(nodes_to_compute, *node_pointer)
-			}
+			nodes_to_compute += len(nodes_pointer_list)
 		}
 	}
 
@@ -247,13 +245,10 @@ func parallelCompareTreeWithIdenticalHashes(m map[int][]*node) []grouping {
 
 	var groups []grouping
 	unique_traversals := make(map[string]int)
-	var time_for_map time.Duration
 
-	for i := 0; i < len(nodes_to_compute); i++ {
+	for i := 0; i < nodes_to_compute; i++ {
 		channel_data := <-return_channel
-		time_now := time.Now()
 		groupId, ok := unique_traversals[channel_data.inorder]
-		time_for_map += time.Since(time_now)
 		if ok {
 			//Traversal already accounted for
 			groups[groupId].bstIds = append(groups[groupId].bstIds, channel_data.bst_id)
@@ -269,7 +264,6 @@ func parallelCompareTreeWithIdenticalHashes(m map[int][]*node) []grouping {
 	}
 
 	ParallelWaitGroup.Wait()
-	// fmt.Println("TimeMapCheck", time_for_map)
 	return groups
 }
 
@@ -291,14 +285,16 @@ func printTreeComparisons(groups []grouping) {
 func main() {
 	// Defining arguments
 	var HashWorkersFlag = flag.Int("hash-workers", 1, "Number of threads")
-	// var DataWorkersFlag = flag.Int("data-workers", 1, "Number of threads")
-	var CompWorkersFlag = flag.Int("comp-workers", 1, "Number of threads")
+	var DataWorkersFlag = flag.Int("data-workers", 0, "Number of threads")
+	var CompWorkersFlag = flag.Int("comp-workers", 0, "Number of threads")
 	var use_mutexes = flag.Bool("use-mutex", false, "internal flag control")
 	var input_flag = flag.String("input", "", "string path to an input file")
 	flag.Parse()
 
 	HashWorkers = *HashWorkersFlag
 	CompWorkers = *CompWorkersFlag
+	_ = *DataWorkersFlag
+
 	//Reading Bsts
 	read_file, _ := os.Open(*input_flag)
 	file_scanner := bufio.NewScanner(read_file)
@@ -338,20 +334,22 @@ func main() {
 	}
 
 	fmt.Println("hashTime:", HashTime.Seconds())
-	fmt.Println("hashGroupTime:", HashGroupTime.Seconds())
-	printHashGroups(hash_to_tree_map)
-	var comparison_grouping []grouping
-	start := time.Now()
 
-	if CompWorkers == 1 {
-		// fmt.Println("Comparison Sequentially")
-		comparison_grouping = sequentialCompareTreeWithIdenticalHashes(hash_to_tree_map)
-	} else {
-		// fmt.Println("Comparison N Parallel")
-		comparison_grouping = parallelCompareTreeWithIdenticalHashes(hash_to_tree_map)
+	if CompWorkers != 0 {
+		fmt.Println("hashGroupTime:", HashGroupTime.Seconds())
+		printHashGroups(hash_to_tree_map)
+		var comparison_grouping []grouping
+		start := time.Now()
+		if CompWorkers == 1 {
+			// fmt.Println("Comparison Sequentially")
+			comparison_grouping = sequentialCompareTreeWithIdenticalHashes(hash_to_tree_map)
+		} else {
+			// fmt.Println("Comparison N Parallel")
+			comparison_grouping = parallelCompareTreeWithIdenticalHashes(hash_to_tree_map)
+		}
+		fmt.Println("compareTreeTime:", time.Since(start).Seconds())
+		printTreeComparisons(comparison_grouping)
 	}
-	fmt.Println("compareTreeTime:", time.Since(start).Seconds())
-	printTreeComparisons(comparison_grouping)
 }
 
 func sequentialHashing(bsts []node) map[int][]*node {
