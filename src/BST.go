@@ -13,7 +13,6 @@ import (
 
 var NumberOfBst = 0
 var HashTime time.Duration
-var HashGroupTime time.Duration
 var HashWorkers = 1
 var CompWorkers = 1
 var HashMutex sync.RWMutex
@@ -320,23 +319,31 @@ func main() {
 	}
 	read_file.Close()
 
-	var hash_to_tree_map map[int][]*node
+	var hash_data []hashChannelData
 	if HashWorkers == 1 {
 		// fmt.Println("Hashing Sequentially")
-		hash_to_tree_map = sequentialHashing(bsts)
+		hash_start := time.Now()
+		hash_data = sequentialHashing(bsts)
+		HashTime += time.Since(hash_start)
 	} else {
 		// fmt.Println("Hashing in Parallel")
 		if *use_mutexes {
-			hash_to_tree_map = goroutineHashingMutex(bsts)
+			hash_start := time.Now()
+			hash_data = goroutineHashingMutex(bsts)
+			HashTime += time.Since(hash_start)
 		} else {
-			hash_to_tree_map = goroutineHashingChannels(bsts)
+			hash_start := time.Now()
+			hash_data = goroutineHashingChannels(bsts)
+			HashTime += time.Since(hash_start)
 		}
 	}
-
 	fmt.Println("hashTime:", HashTime.Seconds())
 
 	if CompWorkers != 0 {
-		fmt.Println("hashGroupTime:", HashGroupTime.Seconds())
+		var hash_to_tree_map map[int][]*node
+		group_time := time.Now()
+		hash_to_tree_map = findHashGroups(hash_data)
+		fmt.Println("hashGroupTime:", time.Since(group_time).Seconds()+HashTime.Seconds())
 		printHashGroups(hash_to_tree_map)
 		var comparison_grouping []grouping
 		start := time.Now()
@@ -352,24 +359,28 @@ func main() {
 	}
 }
 
-func sequentialHashing(bsts []node) map[int][]*node {
-	hash_to_tree_map := make(map[int][]*node)
+func sequentialHashing(bsts []node) []hashChannelData {
+	var hash_data []hashChannelData
 	for i := 0; i < NumberOfBst; i++ {
-		hash_start := time.Now()
 		hash := computeHash(&bsts[i], 1)
-		HashTime += time.Since(hash_start)
-		hash_to_tree_map[hash] = append(hash_to_tree_map[hash], &bsts[i])
-		HashGroupTime += time.Since(hash_start)
+		hash_channel := hashChannelData{&bsts[i], hash}
+		hash_data = append(hash_data, hash_channel)
+	}
+	return hash_data
+}
+
+func findHashGroups(hash_data []hashChannelData) map[int][]*node {
+	hash_to_tree_map := make(map[int][]*node)
+	for _, data := range hash_data {
+		hash_to_tree_map[data.hash] = append(hash_to_tree_map[data.hash], data.node)
 	}
 	return hash_to_tree_map
 }
 
-func goroutineHashingChannels(bsts []node) map[int][]*node {
-	hash_to_tree_map := make(map[int][]*node)
+func goroutineHashingChannels(bsts []node) []hashChannelData {
 	hashChannel := make(chan hashChannelData)
 	var hash_channel_data_list []hashChannelData
 
-	hash_start := time.Now()
 	for i := 0; i < HashWorkers; i++ {
 		go computeHashToChannel(i, bsts, hashChannel)
 	}
@@ -378,15 +389,8 @@ func goroutineHashingChannels(bsts []node) map[int][]*node {
 		hash_channel_data := <-hashChannel
 		hash_channel_data_list = append(hash_channel_data_list, hash_channel_data)
 	}
-	HashTime = time.Since(hash_start)
 
-	for i := 0; i < NumberOfBst; i++ {
-		hash_channel_data := hash_channel_data_list[i]
-		hash_to_tree_map[hash_channel_data.hash] = append(hash_to_tree_map[hash_channel_data.hash], hash_channel_data.node)
-	}
-	HashGroupTime = time.Since(hash_start)
-
-	return hash_to_tree_map
+	return hash_channel_data_list
 }
 
 func computeHashToChannel(offset int, bsts []node, result chan hashChannelData) {
@@ -398,26 +402,16 @@ func computeHashToChannel(offset int, bsts []node, result chan hashChannelData) 
 	}
 }
 
-func goroutineHashingMutex(bsts []node) map[int][]*node {
-	hash_to_tree_map := make(map[int][]*node)
+func goroutineHashingMutex(bsts []node) []hashChannelData {
 	var hash_data_list []hashChannelData
 
 	HashWaitGroup.Add(HashWorkers)
-	hash_start := time.Now()
 	for i := 0; i < HashWorkers; i++ {
 		go computeHashUsingMutex(i, bsts, &hash_data_list)
 	}
 
 	HashWaitGroup.Wait()
-	HashTime = time.Since(hash_start)
-
-	for i := 0; i < NumberOfBst; i++ {
-		hash_channel_data := hash_data_list[i]
-		hash_to_tree_map[hash_channel_data.hash] = append(hash_to_tree_map[hash_channel_data.hash], hash_channel_data.node)
-	}
-	HashGroupTime = time.Since(hash_start)
-
-	return hash_to_tree_map
+	return hash_data_list
 }
 
 func computeHashUsingMutex(offset int, bsts []node, hash_data_list *[]hashChannelData) {

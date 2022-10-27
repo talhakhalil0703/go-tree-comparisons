@@ -3,8 +3,8 @@ from pathlib import Path
 EXEC = "go run src/BST.go"
 
 def main():
-    run(r"input\fine.txt", [100000, 1 ,2 ,4, 8 ,16], [1 ,2, 4, 8, 16])
-    run(r"input\coarse.txt", [100, 1 ,2 ,4, 8 ,16], [1 ,2, 4, 8, 16])
+    run(r"input/fine.txt", [100000, 1 ,2 ,4, 8 ,16], [])
+    run(r"input/coarse.txt", [100, 1 ,2 ,4, 8 ,16], [1 ,2, 4, 8, 16])
 
 def run(input, hash_workers, comp_workers):
   for hash in hash_workers:
