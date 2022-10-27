@@ -339,12 +339,17 @@ func main() {
 	}
 	fmt.Println("hashTime:", HashTime.Seconds())
 
-	if CompWorkers != 0 {
-		var hash_to_tree_map map[int][]*node
+	var hash_to_tree_map map[int][]*node
+
+	if *DataWorkersFlag != 0 || CompWorkers != 0 {
 		group_time := time.Now()
 		hash_to_tree_map = findHashGroups(hash_data)
 		fmt.Println("hashGroupTime:", time.Since(group_time).Seconds()+HashTime.Seconds())
 		printHashGroups(hash_to_tree_map)
+	}
+
+	if CompWorkers != 0 {
+
 		var comparison_grouping []grouping
 		start := time.Now()
 		if CompWorkers == 1 {

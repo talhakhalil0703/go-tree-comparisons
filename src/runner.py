@@ -10,6 +10,8 @@ def run(input, hash_workers, comp_workers):
   for hash in hash_workers:
     run_single(input, f"-hash-workers {hash}")
     run_single(input, f"-hash-workers {hash} -use-mutex")
+    run_single(input, f"-hash-workers {hash} -data-workers 1")
+    run_single(input, f"-hash-workers {hash} -data-workers 1 -use-mutex")
     for comp in comp_workers:
       run_single(input, f"-hash-workers {hash} -comp-workers {comp}")
       run_single(input, f"-hash-workers {hash} -comp-workers {comp} -use-mutex")
