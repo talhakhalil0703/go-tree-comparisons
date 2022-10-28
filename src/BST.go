@@ -240,13 +240,6 @@ func parallelCompareTreeWithIdenticalHashes(m map[int][]*node) []grouping {
 	var groups []grouping
 	//Traversal already accounted for
 	//traversal not accounted for, add it in
-	ParallelWaitGroupEnd.Add(1)
-	go newFunction(return_channel, &groups, unique_group_id)
-	ParallelWaitGroupEnd.Wait()
-	return groups
-}
-
-func newFunction(return_channel chan parallelChannelData, groups *[]grouping, unique_group_id int) {
 	unique_traversals := make(map[string]int)
 
 	returned := 0
@@ -260,19 +253,19 @@ func newFunction(return_channel chan parallelChannelData, groups *[]grouping, un
 
 		groupId, ok := unique_traversals[channel_data.inorder]
 		if ok {
-			(*groups)[groupId].bstIds = append((*groups)[groupId].bstIds, channel_data.bst_id)
+			groups[groupId].bstIds = append(groups[groupId].bstIds, channel_data.bst_id)
 		} else {
 
 			unique_traversals[channel_data.inorder] = unique_group_id
 			var new_group grouping
 			new_group.groupId = unique_group_id
 			new_group.bstIds = append(new_group.bstIds, channel_data.bst_id)
-			(*groups) = append((*groups), new_group)
+			groups = append(groups, new_group)
 			unique_group_id++
 		}
 	}
-	ParallelWaitGroupEnd.Done()
 
+	return groups
 }
 
 func printTreeComparisons(groups []grouping) {
