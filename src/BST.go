@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"flag"
 	"fmt"
 	"os"
@@ -27,7 +28,6 @@ var BufferHasSpace sync.Cond
 var BufferMutex sync.RWMutex
 var PoisonNode node
 var ParallelWaitGroupEnd sync.WaitGroup
-var Items int
 
 type grouping struct {
 	groupId int
@@ -54,6 +54,8 @@ type parallelChannelData struct {
 
 type bufferQ struct {
 	Elements []*node
+	items    int
+	limit    int
 }
 
 func insertIntoBst(root *node, val int) *node {
@@ -101,20 +103,25 @@ func printHashGroups(m map[int][]*node) {
 	}
 }
 
-func createInOrderHashString(root *node, str string) string {
+func createInOrderHashStringHelper(root *node, buffer *bytes.Buffer) {
 	if root.left != nil {
-		str = createInOrderHashString(root.left, str)
+		createInOrderHashStringHelper(root.left, buffer)
 	}
 
 	if root != nil {
-		str += strconv.Itoa(root.value) + " "
+		buffer.WriteString(strconv.Itoa(root.value) + " ")
 	}
 
 	if root.right != nil {
-		str = createInOrderHashString(root.right, str)
+		createInOrderHashStringHelper(root.right, buffer)
 	}
 
-	return str
+}
+
+func createInOrderHashString(root *node, str string) string {
+	var buffer bytes.Buffer
+	createInOrderHashStringHelper(root, &buffer)
+	return buffer.String()
 }
 
 func sequentialCompareTreeWithIdenticalHashes(m map[int][]*node) []grouping {
@@ -150,38 +157,41 @@ func sequentialCompareTreeWithIdenticalHashes(m map[int][]*node) []grouping {
 }
 
 func createBuffer(buffer *bufferQ) {
-	Items = 0
+	buffer.items = 0
+	buffer.limit = CompWorkers
 }
 
 func placeInBuffer(buffer *bufferQ, root *node) {
+	// time_me := time.Now()
 	BufferMutex.Lock()
-	for Items == CompWorkers {
+	for buffer.items == buffer.limit {
 		BufferHasSpace.Wait()
 	}
 
 	buffer.Elements = append(buffer.Elements, root)
-	Items++
+	buffer.items++
 
-	if Items > 0 {
-		BufferHasData.Signal()
+	if buffer.items > 0 {
+		BufferHasData.Broadcast()
 	}
 
 	BufferMutex.Unlock()
+	// fmt.Println("Placing In Buffer took", time.Since(time_me).Seconds())
 }
 
 func removeFromBuffer(buffer *bufferQ) (root *node) {
 
 	BufferMutex.Lock()
-	for Items == 0 {
+	for buffer.items == 0 {
 		BufferHasData.Wait()
 	}
 
-	Items--
+	buffer.items--
 	var ret *node
 	ret, buffer.Elements = buffer.Elements[0], buffer.Elements[1:]
 
-	if Items < CompWorkers {
-		BufferHasSpace.Signal()
+	if buffer.items < buffer.limit {
+		BufferHasSpace.Broadcast()
 	}
 
 	BufferMutex.Unlock()
@@ -198,7 +208,9 @@ func createInOrderHashStringChannel(return_channel chan parallelChannelData, buf
 			return_channel <- parallelChannelData{nil, "", 0}
 			return
 		}
+		// time_me := time.Now()
 		ret := createInOrderHashString(root, "")
+		// fmt.Println("String took", time.Since(time_me).Seconds())
 		return_channel <- parallelChannelData{root, ret, root.index}
 	}
 }
@@ -209,6 +221,7 @@ func feedNodeDataThroughChannel(m map[int][]*node, buffer *bufferQ) {
 		keys = append(keys, k)
 	}
 
+	// time_me := time.Now()
 	for _, key := range keys {
 		nodes_pointer_list := m[key]
 		if len(nodes_pointer_list) > 1 {
@@ -217,6 +230,7 @@ func feedNodeDataThroughChannel(m map[int][]*node, buffer *bufferQ) {
 			}
 		}
 	}
+	// fmt.Println("Sending Data Time", time.Since(time_me).Seconds())
 
 	for i := 0; i < CompWorkers; i++ {
 		placeInBuffer(buffer, nil)
