@@ -238,14 +238,10 @@ func parallelCompareTreeWithIdenticalHashes(m map[int][]*node) []grouping {
 	}
 
 	var groups []grouping
-	//Traversal already accounted for
-	//traversal not accounted for, add it in
 	unique_traversals := make(map[string]int)
-
 	returned := 0
 	for returned != CompWorkers {
 		channel_data := <-return_channel
-
 		if channel_data.root == nil {
 			returned++
 			continue
@@ -289,6 +285,7 @@ func main() {
 	var DataWorkersFlag = flag.Int("data-workers", 0, "Number of threads")
 	var CompWorkersFlag = flag.Int("comp-workers", 0, "Number of threads")
 	var use_channels = flag.Bool("use-channels", false, "internal flag control")
+	var use_n_parallel = flag.Bool("use-n-parallel", false, "internal flag control")
 	var input_flag = flag.String("input", "", "string path to an input file")
 	flag.Parse()
 
@@ -354,12 +351,16 @@ func main() {
 
 		var comparison_grouping []grouping
 		start := time.Now()
-		if CompWorkers == 1 {
-			// fmt.Println("Comparison Sequentially")
-			comparison_grouping = sequentialCompareTreeWithIdenticalHashes(hash_to_tree_map)
+		if *use_n_parallel {
+			comparison_grouping = parallelCompareTreeWithIdenticalHashesN(hash_to_tree_map)
 		} else {
-			// fmt.Println("Comparison N Parallel")
-			comparison_grouping = parallelCompareTreeWithIdenticalHashes(hash_to_tree_map)
+			if CompWorkers == 1 {
+				// fmt.Println("Comparison Sequentially")
+				comparison_grouping = sequentialCompareTreeWithIdenticalHashes(hash_to_tree_map)
+			} else {
+				// fmt.Println("Comparison N Parallel")
+				comparison_grouping = parallelCompareTreeWithIdenticalHashes(hash_to_tree_map)
+			}
 		}
 		fmt.Println("compareTreeTime:", time.Since(start).Seconds())
 		printTreeComparisons(comparison_grouping)
@@ -431,4 +432,56 @@ func computeHashUsingMutex(offset int, bsts []node, hash_data_list *[]hashChanne
 		HashMutex.Unlock()
 	}
 	HashWaitGroup.Done()
+}
+
+func parallelCompareTreeWithIdenticalHashesN(m map[int][]*node) []grouping {
+	keys := make([]int, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	unique_group_id := 0
+	parallel_channel := make(chan parallelChannelData)
+	for _, key := range keys {
+		nodes_pointer_list := m[key]
+		if len(nodes_pointer_list) > 1 {
+			for _, node_pointer := range nodes_pointer_list {
+				go createInOrderHashStringChannelN(node_pointer, parallel_channel)
+			}
+		}
+	}
+
+	var groups []grouping
+	unique_traversals := make(map[string]int)
+	var time_for_map time.Duration
+	for _, key := range keys {
+		nodes_pointer_list := m[key]
+		if len(nodes_pointer_list) > 1 {
+			for i := 0; i < len(nodes_pointer_list); i++ {
+				channel_data := <-parallel_channel
+				time_now := time.Now()
+				groupId, ok := unique_traversals[channel_data.inorder]
+				time_for_map += time.Since(time_now)
+				if ok {
+					//Traversal already accounted for
+					groups[groupId].bstIds = append(groups[groupId].bstIds, channel_data.bst_id)
+				} else {
+					//traversal not accounted for, add it in
+					unique_traversals[channel_data.inorder] = unique_group_id
+					var new_group grouping
+					new_group.groupId = unique_group_id
+					new_group.bstIds = append(new_group.bstIds, channel_data.bst_id)
+					groups = append(groups, new_group)
+					unique_group_id++
+				}
+			}
+		}
+	}
+
+	// fmt.Println("TimeMapCheck", time_for_map)
+	return groups
+}
+
+func createInOrderHashStringChannelN(root *node, result chan parallelChannelData) {
+	ret := createInOrderHashString(root, "")
+	result <- parallelChannelData{root, ret, root.index}
 }
