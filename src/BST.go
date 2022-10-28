@@ -286,7 +286,7 @@ func main() {
 	var HashWorkersFlag = flag.Int("hash-workers", 1, "Number of threads")
 	var DataWorkersFlag = flag.Int("data-workers", 0, "Number of threads")
 	var CompWorkersFlag = flag.Int("comp-workers", 0, "Number of threads")
-	var use_mutexes = flag.Bool("use-mutex", false, "internal flag control")
+	var use_channels = flag.Bool("use-channels", false, "internal flag control")
 	var input_flag = flag.String("input", "", "string path to an input file")
 	flag.Parse()
 
@@ -327,13 +327,13 @@ func main() {
 		HashTime += time.Since(hash_start)
 	} else {
 		// fmt.Println("Hashing in Parallel")
-		if *use_mutexes {
+		if *use_channels {
 			hash_start := time.Now()
-			hash_data = goroutineHashingMutex(bsts)
+			hash_data = goroutineHashingChannels(bsts)
 			HashTime += time.Since(hash_start)
 		} else {
 			hash_start := time.Now()
-			hash_data = goroutineHashingChannels(bsts)
+			hash_data = goroutineHashingMutex(bsts)
 			HashTime += time.Since(hash_start)
 		}
 	}
