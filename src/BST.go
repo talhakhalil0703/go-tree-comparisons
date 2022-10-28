@@ -25,6 +25,9 @@ var ComparisonUniqueTraversal sync.RWMutex
 var BufferHasData sync.Cond
 var BufferHasSpace sync.Cond
 var BufferMutex sync.RWMutex
+var PoisonNode node
+var ParallelWaitGroupEnd sync.WaitGroup
+var Items int
 
 type grouping struct {
 	groupId int
@@ -49,9 +52,8 @@ type parallelChannelData struct {
 	bst_id  int
 }
 
-type nodeBuffer struct {
-	data  []*node
-	items int
+type bufferQ struct {
+	Elements []*node
 }
 
 func insertIntoBst(root *node, val int) *node {
@@ -147,38 +149,38 @@ func sequentialCompareTreeWithIdenticalHashes(m map[int][]*node) []grouping {
 	return groups
 }
 
-func createBuffer(buffer *nodeBuffer) {
-	buffer.data = make([]*node, CompWorkers)
-	buffer.items = 0
+func createBuffer(buffer *bufferQ) {
+	Items = 0
 }
 
-func placeInBuffer(buffer *nodeBuffer, root *node) {
+func placeInBuffer(buffer *bufferQ, root *node) {
 	BufferMutex.Lock()
-	for (*buffer).items == CompWorkers {
+	for Items == CompWorkers {
 		BufferHasSpace.Wait()
 	}
 
-	(*buffer).data[(*buffer).items] = root
-	(*buffer).items++
+	buffer.Elements = append(buffer.Elements, root)
+	Items++
 
-	if (*buffer).items > 0 {
+	if Items > 0 {
 		BufferHasData.Signal()
 	}
 
 	BufferMutex.Unlock()
 }
 
-func removeFromBuffer(buffer *nodeBuffer) (root *node) {
+func removeFromBuffer(buffer *bufferQ) (root *node) {
 
 	BufferMutex.Lock()
-	for (*buffer).items == 0 {
+	for Items == 0 {
 		BufferHasData.Wait()
 	}
 
-	(*buffer).items--
-	ret := (*buffer).data[(*buffer).items]
+	Items--
+	var ret *node
+	ret, buffer.Elements = buffer.Elements[0], buffer.Elements[1:]
 
-	if (*buffer).items < CompWorkers {
+	if Items < CompWorkers {
 		BufferHasSpace.Signal()
 	}
 
@@ -187,19 +189,21 @@ func removeFromBuffer(buffer *nodeBuffer) (root *node) {
 	return ret
 }
 
-func createInOrderHashStringChannel(nodes_to_compute int, return_channel chan parallelChannelData, buffer *nodeBuffer, offset int) {
+func createInOrderHashStringChannel(return_channel chan parallelChannelData, buffer *bufferQ, offset int) {
 
-	for i := offset; i < nodes_to_compute; i += CompWorkers {
+	for {
 		root := removeFromBuffer(buffer)
+		if root == nil {
+			// A channel is a blocking call.
+			return_channel <- parallelChannelData{nil, "", 0}
+			return
+		}
 		ret := createInOrderHashString(root, "")
 		return_channel <- parallelChannelData{root, ret, root.index}
 	}
-
-	ParallelWaitGroup.Done()
-
 }
 
-func feedNodeDataThroughChannel(m map[int][]*node, buffer *nodeBuffer) {
+func feedNodeDataThroughChannel(m map[int][]*node, buffer *bufferQ) {
 	keys := make([]int, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
@@ -213,57 +217,62 @@ func feedNodeDataThroughChannel(m map[int][]*node, buffer *nodeBuffer) {
 			}
 		}
 	}
+
+	for i := 0; i < CompWorkers; i++ {
+		placeInBuffer(buffer, nil)
+	}
 }
 
 func parallelCompareTreeWithIdenticalHashes(m map[int][]*node) []grouping {
-	keys := make([]int, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
 	unique_group_id := 0
-	return_channel := make(chan parallelChannelData)
+	return_channel := make(chan parallelChannelData, CompWorkers)
 
-	nodes_to_compute := 0
-	ParallelWaitGroup.Add(CompWorkers)
-
-	var buffer nodeBuffer
+	var buffer bufferQ
 	createBuffer(&buffer)
 	BufferHasSpace = *sync.NewCond(&BufferMutex)
 	BufferHasData = *sync.NewCond(&BufferMutex)
 	go feedNodeDataThroughChannel(m, &buffer)
-	for _, key := range keys {
-		nodes_pointer_list := m[key]
-		if len(nodes_pointer_list) > 1 {
-			nodes_to_compute += len(nodes_pointer_list)
-		}
-	}
 
 	for i := 0; i < CompWorkers; i++ {
-		go createInOrderHashStringChannel(nodes_to_compute, return_channel, &buffer, i)
+		go createInOrderHashStringChannel(return_channel, &buffer, i)
 	}
 
 	var groups []grouping
+	//Traversal already accounted for
+	//traversal not accounted for, add it in
+	ParallelWaitGroupEnd.Add(1)
+	go newFunction(return_channel, &groups, unique_group_id)
+	ParallelWaitGroupEnd.Wait()
+	return groups
+}
+
+func newFunction(return_channel chan parallelChannelData, groups *[]grouping, unique_group_id int) {
 	unique_traversals := make(map[string]int)
 
-	for i := 0; i < nodes_to_compute; i++ {
+	returned := 0
+	for returned != CompWorkers {
 		channel_data := <-return_channel
+
+		if channel_data.root == nil {
+			returned++
+			continue
+		}
+
 		groupId, ok := unique_traversals[channel_data.inorder]
 		if ok {
-			//Traversal already accounted for
-			groups[groupId].bstIds = append(groups[groupId].bstIds, channel_data.bst_id)
+			(*groups)[groupId].bstIds = append((*groups)[groupId].bstIds, channel_data.bst_id)
 		} else {
-			//traversal not accounted for, add it in
+
 			unique_traversals[channel_data.inorder] = unique_group_id
 			var new_group grouping
 			new_group.groupId = unique_group_id
 			new_group.bstIds = append(new_group.bstIds, channel_data.bst_id)
-			groups = append(groups, new_group)
+			(*groups) = append((*groups), new_group)
 			unique_group_id++
 		}
 	}
+	ParallelWaitGroupEnd.Done()
 
-	ParallelWaitGroup.Wait()
-	return groups
 }
 
 func printTreeComparisons(groups []grouping) {
